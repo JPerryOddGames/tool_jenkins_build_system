@@ -33,6 +33,7 @@ namespace ODDFramework
         private const string ENV_KEY_CHANGESET = "CHANGESET_ID";
         private const string ENV_KEY_BUILDPATH = "BUILD_PATH";
         private const string ENV_KEY_ARTIFACTPATH = "ARTIFACT_PATH";
+        private const string ENV_KEY_PREBUILD_METHODS = "PRE_BUILD_METHODS";
 
         private static BuildReport report;
         private static readonly List<string> capturedErrors = new();
@@ -211,6 +212,9 @@ public static void Build(string outputPath, BuildOptions options)
                 // Update version data before building so it's included in the build
                 UpdateVersionData();
 
+                // Project checks run before any content is built, so a failure costs no build time.
+                RunPreBuildMethods();
+
                 // Addressables content is built by the player build itself when the project's
                 // "Build Addressables on Player Build" setting is on; only build it up-front when
                 // that setting is off (otherwise nothing would build it). Self-skips if unused.
@@ -247,6 +251,72 @@ public static void Build(string outputPath, BuildOptions options)
                 EditorApplication.Exit(exitCode);
             }
 
+        }
+
+        /// <summary>
+        /// Run each static, parameterless method named in PRE_BUILD_METHODS, in order, before any content
+        /// or player build. Entries are ';'-separated "Namespace.Type.Method" names, as for Unity's
+        /// -executeMethod (a nested type is written "Outer+Inner"). A method that throws, or a name that
+        /// does not resolve, fails the build. Unset or empty: no-op.
+        /// </summary>
+        private static void RunPreBuildMethods()
+        {
+            string spec = GetVariable(ENV_KEY_PREBUILD_METHODS, string.Empty);
+            if (string.IsNullOrWhiteSpace(spec))
+                return;
+
+            foreach (string entry in spec.Split(';'))
+            {
+                string name = entry.Trim();
+                if (name.Length == 0)
+                    continue;
+
+                System.Reflection.MethodInfo method = ResolvePreBuildMethod(name);
+
+                Log($"Running pre-build method {name}...");
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+
+                try
+                {
+                    method.Invoke(null, null);
+                }
+                catch (System.Reflection.TargetInvocationException ex)
+                {
+                    // The full chain is logged here: an exception built around an inner one (such as
+                    // BuildFailedException) carries only a default message of its own.
+                    Exception cause = ex.InnerException ?? ex;
+                    LogError($"Pre-build method {name} failed after {sw.Elapsed.TotalSeconds:F1}s:\n{cause}");
+                    throw new Exception($"Pre-build method '{name}' failed with {cause.GetType().Name} - see the log above");
+                }
+
+                Log($"✓ Pre-build method {name} completed in {sw.Elapsed.TotalSeconds:F1}s");
+            }
+        }
+
+        private static System.Reflection.MethodInfo ResolvePreBuildMethod(string qualifiedName)
+        {
+            int dot = qualifiedName.LastIndexOf('.');
+            if (dot <= 0 || dot == qualifiedName.Length - 1)
+                throw new Exception($"{ENV_KEY_PREBUILD_METHODS} entry '{qualifiedName}' is not of the form Namespace.Type.Method");
+
+            string typeName = qualifiedName.Substring(0, dot);
+            string methodName = qualifiedName.Substring(dot + 1);
+
+            Type type = AppDomain.CurrentDomain.GetAssemblies()
+                .Select(assembly => assembly.GetType(typeName, throwOnError: false))
+                .FirstOrDefault(t => t != null);
+
+            if (type == null)
+                throw new Exception($"{ENV_KEY_PREBUILD_METHODS}: no loaded assembly defines type '{typeName}'");
+
+            const System.Reflection.BindingFlags flags =
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static;
+
+            System.Reflection.MethodInfo method = type.GetMethod(methodName, flags, null, Type.EmptyTypes, null);
+            if (method == null)
+                throw new Exception($"{ENV_KEY_PREBUILD_METHODS}: '{typeName}' has no static parameterless method '{methodName}'");
+
+            return method;
         }
 
         /// <summary>

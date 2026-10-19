@@ -325,6 +325,15 @@ after the last build step) reads that one file → `setUnstable()` once with the
 - **Org-scoped PATs**: set job env `GITHUB_ORG_PATS="org=credentialId; org2=credId2"` (Secret-text credentials). `configureGitHubOrgPats()` adds a `git insteadOf` for `github.com/<org>/` using the `x-access-token:<PAT>@` form (fine-grained PATs / GitHub App tokens). Git uses the **longest-matching** insteadOf, so the org PAT wins for that org while the `github` cred covers the rest.
 - Tokens are passed via the bound credential's env var (`%VAR%` / `${VAR}`), **never** Groovy-interpolated into the command — avoids leaking the secret into the script text. `cleanupGitAuth()` unsets every `url.*@github.com/` entry (piped/captured so token-bearing keys aren't echoed).
 
+## Pre-Build Methods (`PRE_BUILD_METHODS`)
+
+Job env `PRE_BUILD_METHODS="Namespace.Type.Method; Other.Type.Method"` names static, parameterless methods in the Unity project. `Pipeline.Build()` runs them in order inside the Build invocation, after `UpdateVersionData()` and **before** `EnsureAddressablesContentBuilt` and the player build, so a project's data checks fail a build before any content is built. A nested type is written `Outer+Inner`.
+
+- A method that throws fails the build (exit 1): the full exception chain is logged, then `Build failed: Pre-build method '...' failed ...`.
+- A name that does not resolve (missing type or method) also fails the build, so a typo cannot silently skip the checks.
+- Unset or empty: no-op. Each project opts in through its own job configuration; the pipeline never names project types.
+- Not to be confused with `PREBUILD_SCRIPT` (below), which runs a shell script on the agent before Unity opens.
+
 ## Pre-Build Script (one-off agent fix-ups)
 
 `PREBUILD_SCRIPT` text param runs on the agent after checkout, before Unity opens — for agent-only state a clean repo can't fix (e.g. an orphaned `Assets/Plugins/Android/*.androidlib`, stale `Library/Bee/Android`). PowerShell on Windows agents, bash on macOS (auto by agent OS via the platform module). Best-effort: non-zero exit warns and continues unless `PREBUILD_FAIL_ON_ERROR=true`. New params don't appear until the job has run once with the updated Jenkinsfile.
