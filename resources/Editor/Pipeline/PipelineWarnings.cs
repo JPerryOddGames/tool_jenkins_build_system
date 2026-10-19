@@ -8,7 +8,8 @@ using UnityEngine;
 namespace ODDFramework
 {
     /// <summary>
-    /// Build warnings that make the Jenkins build UNSTABLE (yellow) without failing it.
+    /// Build warnings that make the Jenkins build UNSTABLE (yellow) without failing it, and build errors
+    /// that name the cause when a build fails.
     ///
     /// Raise one from anywhere in the project - runtime or editor code, any assembly:
     ///   Debug.LogWarning("[BUILD-WARN] 3 localisation keys missing");   // marker in any log message
@@ -17,22 +18,29 @@ namespace ODDFramework
     /// "Build Warnings" stage reads that file, flags the build UNSTABLE, and lists the lines in the
     /// Slack post, on a badge, and in a sidebar link. The player still builds and uploads.
     ///
+    /// A log line carrying "[BUILD-ERROR]" lands in ARTIFACT_PATH/build_errors.txt the same way. It does
+    /// not fail the build by itself; when the Unity step fails, those lines are reported as the build's
+    /// known error (in the log and the Slack post) in place of the AI error analysis.
+    ///
     /// Optional: UNSTABLE_WARNING_PATTERNS (Jenkins job env, ';'-separated regexes, case-insensitive)
     /// promotes matching native Unity warnings/errors too, e.g. "Shader error in;Missing script".
     ///
-    /// The log hook is installed on every editor load in batch mode, so warnings raised during asset
+    /// The log hook is installed on every editor load in batch mode, so lines logged during asset
     /// import, Prepare, and the player build are all caught. Cost: one string search per log line,
-    /// one file append per NEW warning. No Unity API is touched from the (possibly worker-thread)
+    /// one file append per NEW line. No Unity API is touched from the (possibly worker-thread)
     /// callback. Outside batch mode / Jenkins this whole file is inert.
     /// </summary>
     public static partial class Pipeline
     {
         public const string WarningMarker = "[BUILD-WARN]";
+        public const string ErrorMarker = "[BUILD-ERROR]";
         private const string WarningsFileName = "build_warnings.txt";
-        private const int MaxWarningLength = 300;
+        private const string ErrorsFileName = "build_errors.txt";
+        private const int MaxReportLineLength = 300;
 
-        private static readonly object warnLock = new object();
-        private static HashSet<string> recordedWarnings;   // lazily seeded from the file (survives domain reloads)
+        private static readonly object reportLock = new object();
+        // Per report file, lazily seeded from the file (survives domain reloads).
+        private static readonly Dictionary<string, HashSet<string>> recordedLines = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
         private static Regex[] warningPatterns;
 
         [InitializeOnLoadMethod]
@@ -52,7 +60,7 @@ namespace ODDFramework
         public static void Warn(string message)
         {
             if (string.IsNullOrWhiteSpace(message)) return;
-            RecordWarning(message);
+            RecordLine(message, WarningsFileName);
             Debug.LogWarning($"{WarningMarker} {message}");
         }
 
@@ -62,10 +70,17 @@ namespace ODDFramework
             {
                 if (string.IsNullOrEmpty(condition)) return;
 
+                int errorIdx = condition.IndexOf(ErrorMarker, StringComparison.Ordinal);
+                if (errorIdx >= 0)
+                {
+                    RecordLine(condition.Substring(errorIdx + ErrorMarker.Length), ErrorsFileName);
+                    return;
+                }
+
                 int idx = condition.IndexOf(WarningMarker, StringComparison.Ordinal);
                 if (idx >= 0)
                 {
-                    RecordWarning(condition.Substring(idx + WarningMarker.Length));
+                    RecordLine(condition.Substring(idx + WarningMarker.Length), WarningsFileName);
                     return;
                 }
 
@@ -76,7 +91,7 @@ namespace ODDFramework
                 {
                     if (pattern.IsMatch(condition))
                     {
-                        RecordWarning(condition);
+                        RecordLine(condition, WarningsFileName);
                         return;
                     }
                 }
@@ -87,40 +102,41 @@ namespace ODDFramework
             }
         }
 
-        /// <summary>First line only, trimmed and capped, so one warning is one line in the report.</summary>
-        private static string NormalizeWarning(string raw)
+        /// <summary>First line only, trimmed and capped, so one entry is one line in the report.</summary>
+        private static string NormalizeReportLine(string raw)
         {
             string line = raw.Trim();
             int nl = line.IndexOfAny(new[] { '\r', '\n' });
             if (nl >= 0) line = line.Substring(0, nl).Trim();
-            if (line.Length > MaxWarningLength) line = line.Substring(0, MaxWarningLength) + "…";
+            if (line.Length > MaxReportLineLength) line = line.Substring(0, MaxReportLineLength) + "…";
             return line;
         }
 
-        private static void RecordWarning(string raw)
+        private static void RecordLine(string raw, string fileName)
         {
-            string line = NormalizeWarning(raw);
+            string line = NormalizeReportLine(raw);
             if (line.Length == 0) return;
 
             string artifacts = ArtifactPath;
             if (string.IsNullOrEmpty(artifacts)) return;
-            string path = Path.Combine(artifacts, WarningsFileName);
+            string path = Path.Combine(artifacts, fileName);
 
-            lock (warnLock)
+            lock (reportLock)
             {
-                if (recordedWarnings == null)
+                if (!recordedLines.TryGetValue(fileName, out HashSet<string> recorded))
                 {
-                    recordedWarnings = new HashSet<string>(StringComparer.Ordinal);
+                    recorded = new HashSet<string>(StringComparer.Ordinal);
+                    recordedLines[fileName] = recorded;
                     try
                     {
                         if (File.Exists(path))
                             foreach (string existing in File.ReadAllLines(path))
-                                recordedWarnings.Add(existing.Trim());
+                                recorded.Add(existing.Trim());
                     }
                     catch { /* unreadable file: start fresh, duplicates are removed on the Jenkins side too */ }
                 }
 
-                if (!recordedWarnings.Add(line)) return;
+                if (!recorded.Add(line)) return;
 
                 try
                 {
@@ -130,7 +146,7 @@ namespace ODDFramework
                 catch (Exception ex)
                 {
                     // Can't reach the artifact dir - the log line still carries the marker for humans.
-                    Console.Error.WriteLine($"[Pipeline] Could not record build warning to {path}: {ex.Message}");
+                    Console.Error.WriteLine($"[Pipeline] Could not record build report line to {path}: {ex.Message}");
                 }
             }
         }

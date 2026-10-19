@@ -215,6 +215,43 @@ def failWithKnownError(String badgeLabel, String explanation, String fix = null)
 }
 
 /**
+ * Fail as a known error (no AI analysis) listing the errors build tools reported in
+ * ARTIFACT_PATH/build_errors.txt — Unity writes that file from any log line carrying [BUILD-ERROR]
+ * (PipelineWarnings.cs). No-op when the file is absent or empty, so the caller's own failure
+ * handling still runs. Call it only once the build step has already failed.
+ */
+def failWithReportedBuildErrors() {
+    if (!env.ARTIFACT_PATH) return
+    def reportPath = "${env.ARTIFACT_PATH}/build_errors.txt"
+
+    def lines = []
+    try {
+        if (!fileExists(reportPath)) return
+        lines = readFile(reportPath).readLines().collect { it.trim() }.findAll { it }.unique()
+    } catch (Exception e) {
+        echo "[WARN] Could not read ${reportPath}: ${e.message}"
+        return
+    }
+    if (!lines) return
+
+    echo "========== BUILD ERRORS (${lines.size()}) =========="
+    lines.each { echo "  - ${it}" }
+    echo "=============================================="
+
+    def stage = env.CURRENT_STAGE ?: 'Unity Build'
+    def maxShown = 10
+    def shown = lines.take(maxShown)
+    def more = lines.size() > maxShown ? "\n… ${lines.size() - maxShown} more — see build_errors.txt" : ''
+    def explanation = "Build errors (${lines.size()}):\n${shown.collect { "• ${it}" }.join('\n')}${more}"
+
+    def errors = shown.collect { [severity: 'ERROR', stage: stage, message: it] }
+    def analysis = [explanation: explanation, errors: errors, knownError: true]
+    env.ERROR_ANALYSIS = new groovy.json.JsonBuilder(analysis).toString()
+    env.SKIP_AI_ANALYSIS = 'true'
+    error(explanation)
+}
+
+/**
  * Validate required environment variables — fails with known error if any are missing.
  * Use in Validate stage instead of inline checks in each jenkinsfile.
  */

@@ -298,6 +298,15 @@ after the last build step) reads that one file → `setUnstable()` once with the
 - Keep tools decoupled: a tool that wants to flag the build emits the marker (or matches a pattern);
   the pipeline never reads another product's private files or APIs.
 
+### Build Errors (`[BUILD-ERROR]`)
+
+The same hook collects any log line carrying `[BUILD-ERROR]` into `ARTIFACT_PATH/build_errors.txt`. The
+marker does not fail the build — the tool still has to fail it (in Unity, `BuildFailedException` from a
+build callback, or an exception from a `PRE_BUILD_METHODS` method). When the Unity step then exits
+non-zero, `runUnityCommand()` calls `failWithReportedBuildErrors()`, which fails as a **known error** listing
+those lines (first 10 in the explanation) — the Slack post shows them instead of the AI error analysis. No
+file, or an empty one: the usual `Unity command failed` failure and analysis run unchanged.
+
 ## Firebase Crashlytics Symbol Upload
 
 1. Set `UPLOAD_CRASHLYTICS_SYMBOLS=true` in Jenkins job config
