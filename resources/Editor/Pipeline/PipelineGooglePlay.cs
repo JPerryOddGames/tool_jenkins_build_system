@@ -136,8 +136,13 @@ namespace ODDFramework
             EditorUserBuildSettings.connectProfiler = true;
             PlayerSettings.enableInternalProfiler = true;
 
-            PlayerSettings.SetScriptingBackend(NamedBuildTarget.Android, ScriptingImplementation.Mono2x);
+            // IL2CPP like Release, so stripping/AOT problems show up in dev builds too.
+            // OptimizeSpeed generates less aggressively than OptimizeSize, so the build is faster.
+            PlayerSettings.SetScriptingBackend(NamedBuildTarget.Android, ScriptingImplementation.IL2CPP);
             PlayerSettings.SetManagedStrippingLevel(NamedBuildTarget.Android, ManagedStrippingLevel.Medium);
+            PlayerSettings.SetIl2CppCompilerConfiguration(NamedBuildTarget.Android, Il2CppCompilerConfiguration.Release);
+            PlayerSettings.SetIl2CppCodeGeneration(NamedBuildTarget.Android, Il2CppCodeGeneration.OptimizeSpeed);
+            PlayerSettings.SetIl2CppStacktraceInformation(NamedBuildTarget.Android, Il2CppStacktraceInformation.MethodFileLineNumber);
 
             PlayerSettings.Android.minifyRelease = false;
             PlayerSettings.Android.minifyDebug = false;

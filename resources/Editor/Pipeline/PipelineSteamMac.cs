@@ -21,8 +21,11 @@ namespace ODDFramework
             PlayerSettings.SetStackTraceLogType(LogType.Assert, StackTraceLogType.Full);
             PlayerSettings.SetStackTraceLogType(LogType.Exception, StackTraceLogType.Full);
 
-            PlayerSettings.SetScriptingBackend(NamedBuildTarget.Standalone, ScriptingImplementation.Mono2x);
+            // IL2CPP like Release, so stripping/AOT problems show up in dev builds too
+            PlayerSettings.SetScriptingBackend(NamedBuildTarget.Standalone, ScriptingImplementation.IL2CPP);
             PlayerSettings.SetManagedStrippingLevel(NamedBuildTarget.Standalone, ManagedStrippingLevel.Medium);
+            PlayerSettings.SetIl2CppCompilerConfiguration(NamedBuildTarget.Standalone, Il2CppCompilerConfiguration.Release);
+            PlayerSettings.SetIl2CppCodeGeneration(NamedBuildTarget.Standalone, Il2CppCodeGeneration.OptimizeSpeed);
         }
 
         private static void ApplyReleaseSettings()

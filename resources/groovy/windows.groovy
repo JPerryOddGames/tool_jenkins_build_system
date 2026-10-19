@@ -4012,11 +4012,9 @@ def validateUnityInstallation() {
     }
 
     // Verify IL2CPP support for platforms that require it
-    // Consoles are IL2CPP-only; all other platforms use IL2CPP for Release builds
-    def il2cppAlways = ['Switch', 'GameCoreXboxSeries', 'GameCoreXboxOne', 'PS5']
-    def il2cppRelease = ['Android', 'Amazon']
-    def needsIl2cpp = (env.PLATFORM in il2cppAlways) ||
-                      (env.PLATFORM in il2cppRelease && env.BUILD_TYPE != 'Debug')
+    // The Pipeline*.cs scripts build IL2CPP for Debug and Release alike (Android Debug was Mono)
+    def il2cppAlways = ['Switch', 'GameCoreXboxSeries', 'GameCoreXboxOne', 'PS5', 'Android', 'Amazon']
+    def needsIl2cpp = env.PLATFORM in il2cppAlways
 
     if (needsIl2cpp) {
         verifyIl2cppSupport(playbackEngines)
@@ -4043,7 +4041,7 @@ def validateUnityInstallation() {
 /**
  * Verify IL2CPP compiler is available in the Unity installation.
  * The IL2CPP compiler lives in Editor\Data\il2cpp\ and is needed by all
- * platforms that use IL2CPP scripting backend (all Release builds + Switch Debug).
+ * platforms that use IL2CPP scripting backend (every Debug and Release player build).
  */
 def verifyIl2cppSupport(String playbackEngines) {
     echo "[INFO] Verifying IL2CPP support for ${env.PLATFORM} (BUILD_TYPE: ${env.BUILD_TYPE ?: 'unset'})..."
