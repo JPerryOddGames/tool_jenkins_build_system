@@ -3847,6 +3847,7 @@ def runUnityCommand(Map config) {
             """
         } else {
             printUnityErrors()
+            common.failWithReportedBuildErrors()
             error "[ERROR] Unity command failed with exit code ${exitCode}"
         }
     }
