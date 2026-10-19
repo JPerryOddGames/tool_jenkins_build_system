@@ -326,6 +326,15 @@ file, or an empty one: the usual `Unity command failed` failure and analysis run
 - The Jenkins pipeline calls `buildUtils.checkBrokenAddressables()` (an `Addressables Check` stage, wired into **all** player-build Jenkinsfiles) which, if that report exists, flags the build **UNSTABLE** via `setUnstable()`. It also parses the report's per-group summary into `env.ADDRESSABLES_REPORT_DETAIL`, which `sendSlackBuildNotification()` renders as a dedicated Slack block (per-group breakdown + a link to the archived report). UNSTABLE does not stop the pipeline — the IPA/AAB still builds and uploads.
 - Do **not** rely on the Editor preference "Build Addressables on Player Build" — it's per-machine/untracked; the in-pipeline steps are what guarantee correctness on CI agents.
 
+## Build Reports (`ARTIFACT_PATH/reports/`)
+
+A build tool that writes a human-readable report into `ARTIFACT_PATH/reports/` gets it archived with the
+build (the `artifacts` dir is archived in `post { always }`), a `Report: <file>` sidebar link, and — on
+unstable or failed builds — a `Reports:` line of links in the Slack post. `linkBuildReports()` (called from
+`sendSlackBuildNotification()`, once per build) lists the folder on the agent; the pipeline never reads
+the reports themselves. Use it for detail too long for a `[BUILD-WARN]` line, so the log and Slack stay
+short while the full list is one click away.
+
 ## GitHub Auth for Private Packages (PATs)
 
 `configureGitAuth()` (in `windows.groovy`/`macos.groovy`, called from `startup()`) sets `git config --global url.insteadOf` so Unity's UPM can resolve private GitHub packages, then `cleanupGitAuth()` removes it in post.
