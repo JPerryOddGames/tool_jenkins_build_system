@@ -200,6 +200,46 @@ def checkBuildWarnings() {
     setUnstable("Build warnings (${lines.size()}):\n${shown.join('\n')}${more}")
 }
 
+// ============================================================================
+// BUILD REPORTS
+//
+// A build tool that writes a human-readable report into ARTIFACT_PATH/reports/ gets it archived with
+// the build (the artifacts dir is archived in post), a sidebar link, and - on unstable or failed
+// builds - a link in the Slack post. The pipeline never reads the reports themselves.
+// ============================================================================
+
+/**
+ * Add a sidebar link per file in ARTIFACT_PATH/reports/ and record the links for the Slack post in
+ * env.BUILD_REPORT_LINKS. Runs once per build; later calls are no-ops. No-op when the folder is
+ * absent or empty, or when there is no agent to list it on.
+ */
+def linkBuildReports() {
+    if (env.BUILD_REPORTS_LINKED == 'true' || !env.ARTIFACT_PATH) return
+    env.BUILD_REPORTS_LINKED = 'true'
+
+    def names = []
+    try {
+        def reportsDir = "${env.ARTIFACT_PATH}/reports"
+        if (!fileExists(reportsDir)) return
+        def listing = isUnix()
+            ? sh(returnStdout: true, script: "ls -1p '${reportsDir}' | grep -v '/\$' || true")
+            : bat(returnStdout: true, script: "@dir /b /a-d \"${reportsDir.replace('/', '\\')}\" 2>nul")
+        names = listing.readLines().collect { it.trim() }.findAll { it }.sort()
+    } catch (Exception e) {
+        echo "[WARN] Could not list build reports: ${e.message}"
+        return
+    }
+    if (!names) return
+
+    // Archived from inside dir('artifacts'), so the reports sit under artifact/reports/.
+    def links = names.collect { name ->
+        def url = "${env.BUILD_URL}artifact/reports/${java.net.URLEncoder.encode(name, 'UTF-8').replace('+', '%20')}"
+        addSidebarLink(url, "Report: ${name}", 'document.png')
+        "<${url}|${name}>"
+    }
+    env.BUILD_REPORT_LINKS = links.join(' · ')
+}
+
 /**
  * Fail the build with a known error — skips AI analysis and sets a custom badge.
  * Use for early failures where the cause is obvious (workspace conflict, missing env vars, tool not found).
@@ -208,6 +248,43 @@ def failWithKnownError(String badgeLabel, String explanation, String fix = null)
     def stage = env.CURRENT_STAGE ?: 'Validate'
     def errors = [[severity: 'ERROR', stage: stage, message: explanation]]
     if (fix) errors[0].fix = fix
+    def analysis = [explanation: explanation, errors: errors, knownError: true]
+    env.ERROR_ANALYSIS = new groovy.json.JsonBuilder(analysis).toString()
+    env.SKIP_AI_ANALYSIS = 'true'
+    error(explanation)
+}
+
+/**
+ * Fail as a known error (no AI analysis) listing the errors build tools reported in
+ * ARTIFACT_PATH/build_errors.txt — Unity writes that file from any log line carrying [BUILD-ERROR]
+ * (PipelineWarnings.cs). No-op when the file is absent or empty, so the caller's own failure
+ * handling still runs. Call it only once the build step has already failed.
+ */
+def failWithReportedBuildErrors() {
+    if (!env.ARTIFACT_PATH) return
+    def reportPath = "${env.ARTIFACT_PATH}/build_errors.txt"
+
+    def lines = []
+    try {
+        if (!fileExists(reportPath)) return
+        lines = readFile(reportPath).readLines().collect { it.trim() }.findAll { it }.unique()
+    } catch (Exception e) {
+        echo "[WARN] Could not read ${reportPath}: ${e.message}"
+        return
+    }
+    if (!lines) return
+
+    echo "========== BUILD ERRORS (${lines.size()}) =========="
+    lines.each { echo "  - ${it}" }
+    echo "=============================================="
+
+    def stage = env.CURRENT_STAGE ?: 'Unity Build'
+    def maxShown = 10
+    def shown = lines.take(maxShown)
+    def more = lines.size() > maxShown ? "\n… ${lines.size() - maxShown} more — see build_errors.txt" : ''
+    def explanation = "Build errors (${lines.size()}):\n${shown.collect { "• ${it}" }.join('\n')}${more}"
+
+    def errors = shown.collect { [severity: 'ERROR', stage: stage, message: it] }
     def analysis = [explanation: explanation, errors: errors, knownError: true]
     env.ERROR_ANALYSIS = new groovy.json.JsonBuilder(analysis).toString()
     env.SKIP_AI_ANALYSIS = 'true'
@@ -1176,6 +1253,12 @@ def sendSlackBuildNotification(Map config) {
     if (env.ADDRESSABLES_REPORT_DETAIL && (status == 'unstable' || status == 'failure')) {
         blocks << [type: 'divider']
         blocks << [type: 'section', text: [type: 'mrkdwn', text: env.ADDRESSABLES_REPORT_DETAIL.take(2900)]]
+    }
+
+    // Reports the build tools left in ARTIFACT_PATH/reports/.
+    linkBuildReports()
+    if (env.BUILD_REPORT_LINKS && (status == 'unstable' || status == 'failure')) {
+        blocks << [type: 'context', elements: [[type: 'mrkdwn', text: ":page_facing_up: Reports: ${env.BUILD_REPORT_LINKS}".take(2900)]]]
     }
 
     if (changeHistory) {
