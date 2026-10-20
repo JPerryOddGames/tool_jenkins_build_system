@@ -130,6 +130,14 @@ auto-install: the versioned module ID parsed fine, then the install threw on ser
 
 `Integer.toHexString()` and `Integer.toString(n, 16)` are **BLOCKED** — use `Math.abs()` with decimal instead. Check Jenkins script approval page if methods are blocked.
 
+Set env vars by literal name (`env.FOO = x`). `env[name] = x` goes through `DefaultGroovyMethods.putAt`, which
+the sandbox rejects — build #13455 lost its Slack post, badges and final archive to it. Don't ask for that
+signature to be approved: it lets a sandboxed script set any property on any object.
+
+Code on the failure path (anything that runs before `error()` or in `post`) must not throw: an exception
+there ends the `post` block, skipping `finalizeBuild()` (the Slack post) and the final artifact archive.
+Wrap best-effort extras such as badges and summary boxes in try/catch, as `linkFailureLog()` does.
+
 ### Winget Package IDs
 
 Use **specific version IDs**, not bare prefix names:
@@ -310,7 +318,7 @@ non-zero, `runUnityCommand()` calls `failWithReportedBuildErrors()`, which fails
 those lines (first 10 in the explanation) — the Slack post shows them instead of the AI error analysis. No
 file, or an empty one: the usual `Unity command failed` failure and analysis run unchanged.
 
-`build_errors.txt` is surfaced like `unity_errors.log`, through the same `linkErrorLog()` (with its own badge
+`build_errors.txt` is surfaced like `unity_errors.log`, through the same `linkFailureLog()` (with its own badge
 id and `BUILD_ERRORS_URL`): a red `build errors │ N` badge on the build list, a summary box listing the lines,
 a sidebar link, a build-description link and a `Build Errors` link in Slack. The lines also match
 `extractErrorLines()`, so they appear in `unity_errors.log`. Make each line say what is wrong, not just how

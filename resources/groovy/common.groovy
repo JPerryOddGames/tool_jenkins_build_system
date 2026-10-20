@@ -302,7 +302,7 @@ def failWithKnownError(String badgeLabel, String explanation, String fix = null)
 /**
  * Fail as a known error (no AI analysis) listing the errors build tools reported in
  * ARTIFACT_PATH/build_errors.txt — Unity writes that file from any log line carrying [BUILD-ERROR]
- * (PipelineWarnings.cs). The file gets the same treatment as unity_errors.log (linkErrorLog): a red
+ * (PipelineWarnings.cs). The file gets the same treatment as unity_errors.log (linkFailureLog): a red
  * 'build errors | N' badge, a summary box listing the errors, a sidebar link, a description entry
  * and env.BUILD_ERRORS_URL for the Slack post. No-op when the file is absent or empty, so the
  * caller's own failure handling still runs. Call it only once the build step has already failed.
@@ -331,7 +331,11 @@ def failWithReportedBuildErrors() {
     def more = lines.size() > maxShown ? "\n… ${lines.size() - maxShown} more — see build_errors.txt" : ''
     def explanation = "Build errors (${lines.size()}):\n${shown.collect { "• ${it}" }.join('\n')}${more}"
 
-    linkErrorLog('build_errors.txt', 'Build Errors', [badgeId: 'build-errors', urlEnv: 'BUILD_ERRORS_URL', logo: null, count: lines.size(), details: shown])
+    def url = linkFailureLog('build_errors.txt', 'Build Errors', env.BUILD_ERRORS_LINKED == 'true', [badgeId: 'build-errors', logo: null, count: lines.size(), details: shown])
+    if (url) {
+        env.BUILD_ERRORS_URL = url
+        env.BUILD_ERRORS_LINKED = 'true'
+    }
 
     def errors = shown.collect { [severity: 'ERROR', stage: stage, message: it] }
     def analysis = [explanation: explanation, errors: errors, knownError: true]
@@ -1913,23 +1917,39 @@ def extractErrorLines(List lines) {
 }
 
 /**
- * Surface a clickable link to an archived error log:
+ * Link unity_errors.log (see linkFailureLog) and record env.UNITY_ERRORS_URL for the Slack post.
+ *
+ * Idempotent: called both inline (printUnityErrors, mid-build) and in post
+ * (collectUnityErrors). The badge/env/description refresh on every call; the
+ * sidebar link and summary box are added once so they don't duplicate.
+ */
+def linkErrorLog(String artifactRelPath, String label = 'Unity Errors') {
+    def url = linkFailureLog(artifactRelPath, label, env.UNITY_ERRORS_LINKED == 'true', [badgeId: 'unity-errors', logo: 'unity'])
+    if (!url) return
+    env.UNITY_ERRORS_URL = url
+    env.UNITY_ERRORS_LINKED = 'true'
+}
+
+/**
+ * Surface a clickable link to an archived error log and return its URL (null without BUILD_URL):
  *   - a red shields.io badge on the build (links to the log),
  *   - a summary box on the build status page (manager.createSummary),
  *   - a left-sidebar link on the build status page (addSidebarLink),
  *   - an entry appended to the build description (shown in the Builds history widget),
- *   - an env var holding the URL, so the Slack notification can link to it,
  *   - the plain URL echoed into the stage log (for the pipeline overview).
- * artifactRelPath is relative to the 'artifacts/' dir (ARTIFACT_PATH).
+ * artifactRelPath is relative to the 'artifacts/' dir (ARTIFACT_PATH). alreadyLinked skips the
+ * summary box and sidebar link, which must be added once per build. The caller records the URL
+ * and its once-only flag in env vars by literal name: this runs in the script sandbox, where
+ * env[name] = value is rejected.
  *
- * The defaults describe unity_errors.log. Another error log passes opts so it does not
- * replace that one's badge or URL:
- *   badgeId  - badge id (default 'unity-errors')
- *   urlEnv   - env var that receives the URL (default 'UNITY_ERRORS_URL'); the
- *              once-only guard is the same name with _URL replaced by _LINKED
- *   logo     - shields.io logo, or null for none (default 'unity')
+ * opts:
+ *   badgeId  - badge id, distinct per log so the logs don't replace each other's badge
+ *   logo     - shields.io logo, or null for none
  *   count    - when set, the badge reads '<label lower-cased> | <count>'
  *   details  - lines listed under the link in the summary box
+ *
+ * Never throws: it runs on the failure path (before error() and in post), where an exception
+ * would skip the Slack post and the final archive.
  *
  * The file is archived HERE, not left for post{always{}}: the Slack failure post
  * goes out from post{failure{}}, which runs BEFORE always{} archives the artifacts
@@ -1937,17 +1957,9 @@ def extractErrorLines(List lines) {
  * clicked it from Slack (build #2458). Archiving the one small file immediately
  * makes the URL live before any notification; the final archive re-archives it
  * harmlessly.
- *
- * Idempotent: called both inline (printUnityErrors, mid-build) and in post
- * (collectUnityErrors). The badge/env/description refresh on every call; the
- * sidebar link and summary box are added once (guarded) so they don't duplicate.
  */
-def linkErrorLog(String artifactRelPath, String label = 'Unity Errors', Map opts = [:]) {
-    if (!env.BUILD_URL) { echo "[WARN] linkErrorLog: BUILD_URL not set, skipping link"; return }
-    def badgeId = opts.badgeId ?: 'unity-errors'
-    def urlEnv = opts.urlEnv ?: 'UNITY_ERRORS_URL'
-    def linkedEnv = urlEnv.replaceAll(/_URL$/, '') + '_LINKED'
-    def logo = opts.containsKey('logo') ? opts.logo : 'unity'
+def linkFailureLog(String artifactRelPath, String label, boolean alreadyLinked, Map opts) {
+    if (!env.BUILD_URL) { echo "[WARN] linkFailureLog: BUILD_URL not set, skipping link"; return null }
 
     def url = "${env.BUILD_URL}artifact/${artifactRelPath}"
     try {
@@ -1957,43 +1969,37 @@ def linkErrorLog(String artifactRelPath, String label = 'Unity Errors', Map opts
             }
         }
     } catch (Exception e) {
-        echo "[WARN] linkErrorLog: could not archive ${artifactRelPath} now (link resolves after the final archive): ${e.message}"
+        echo "[WARN] linkFailureLog: could not archive ${artifactRelPath} now (link resolves after the final archive): ${e.message}"
     }
-    env[urlEnv] = url
     echo "[INFO] ${label} log: ${url}"
 
-    // Red shields.io badge, clickable through to the log (idempotent: addShieldsBadge
-    // removes the prior badge with this id before re-adding).
-    if (opts.count != null) {
-        addShieldsDoubleBadge(badgeId, label.toLowerCase(), "${opts.count}", '555555', 'red', null, url, logo)
-    } else {
-        addShieldsBadge(badgeId, label, 'red', url, logo)
-    }
+    try {
+        // Red shields.io badge, clickable through to the log (idempotent: addShieldsBadge
+        // removes the prior badge with this id before re-adding).
+        if (opts.count != null) {
+            addShieldsDoubleBadge(opts.badgeId, label.toLowerCase(), "${opts.count}", '555555', 'red', null, url, opts.logo)
+        } else {
+            addShieldsBadge(opts.badgeId, label, 'red', url, opts.logo)
+        }
 
-    // Sidebar link + summary box only once, so the inline + post calls don't duplicate them.
-    if (env[linkedEnv] != 'true') {
-        try {
+        if (!alreadyLinked) {
             def html = "<b>${label}:</b> <a href=\"${url}\">${artifactRelPath}</a>"
             if (opts.details) {
                 html += '<ul>' + opts.details.collect { "<li>${escapeHtml(it.toString())}</li>" }.join('') + '</ul>'
             }
             manager.createSummary('error.png').appendText(html, false)
-        } catch (Exception e) {
-            echo "[WARN] linkErrorLog: could not add summary: ${e.message}"
+            addSidebarLink(url, label, 'symbol-warning.png')
         }
-        addSidebarLink(url, label, 'symbol-warning.png')
-        env[linkedEnv] = 'true'
-    }
 
-    try {
         def desc = currentBuild.description ?: ''
         def linkHtml = "<a href=\"${url}\">${label}</a>"
         if (!desc.contains(linkHtml)) {
             currentBuild.description = desc ? "${desc}<br/>${linkHtml}" : linkHtml
         }
     } catch (Exception e) {
-        echo "[WARN] linkErrorLog: could not append to description: ${e.message}"
+        echo "[WARN] linkFailureLog: could not link ${artifactRelPath}: ${e.message}"
     }
+    return url
 }
 
 String escapeHtml(String text) {

@@ -108,7 +108,8 @@ namespace ODDFramework
             string line = raw.Trim();
             int nl = line.IndexOfAny(new[] { '\r', '\n' });
             if (nl >= 0) line = line.Substring(0, nl).Trim();
-            if (line.Length > MaxReportLineLength) line = line.Substring(0, MaxReportLineLength) + "…";
+            // ASCII: Jenkins serves the report without a charset, so a non-ASCII ellipsis shows as mojibake.
+            if (line.Length > MaxReportLineLength) line = line.Substring(0, MaxReportLineLength) + "...";
             return line;
         }
 
