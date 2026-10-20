@@ -313,6 +313,8 @@ file, or an empty one: the usual `Unity command failed` failure and analysis run
 2. Add Firebase Crashlytics Admin role to `google-play-json` service account
 3. Ensure `google-services.json` exists in Unity project (`Assets/StreamingAssets/` or `Assets/Plugins/Android/`)
 4. Runs in parallel with other post-build tasks, skips silently if not configured
+5. A failed upload marks the build UNSTABLE, never FAILED. Android leaves out `libFirebaseCpp*` and `libwebrtc.so`
+   (the `com.unity.webrtc` prebuilt): the symbol generator aborts the whole upload on the first library it cannot process
 
 ## Addressables Content Build + Catalog Validation
 
