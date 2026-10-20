@@ -3763,69 +3763,13 @@ FIX: Remote into the build agent, then:
     }
     echo "[OK] ${firebaseCheck.message}"
 
-    // Verify Firebase CLI works and validate the app ID exists with Crashlytics access
-    // Reuses google-play-json credential (add Firebase Crashlytics Admin role to the service account)
-    // Use FIREBASE_CMD if set (for Jenkins service accounts without PATH)
-    def firebaseCmd = env.FIREBASE_CMD ?: 'firebase'
-    def nodejsDirValidation = (env.NODEJS_HOME ?: 'C:\\Program Files\\nodejs').replace('/', '\\')
-    withCredentials([file(credentialsId: 'google-play-json', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
-        bat """
-            @echo off
-            REM Ensure Node.js is in PATH (required for firebase.cmd)
-            if exist "${nodejsDirValidation}\\node.exe" set "PATH=${nodejsDirValidation};%PATH%"
-            "${firebaseCmd}" --version || exit /b 1
-            echo [OK] Firebase CLI available
-
-            echo [INFO] Validating Firebase App ID: ${firebaseAppId}
-            "${firebaseCmd}" apps:sdkconfig --app="${firebaseAppId}" >nul 2>&1
-            if errorlevel 1 (
-                echo [ERROR] Firebase App ID validation failed - app not found or credentials invalid
-                echo.
-                echo To fix:
-                echo   1. Verify google-services.json contains the correct mobilesdk_app_id
-                echo   2. Add Firebase Admin permissions to google-play-json service account:
-                echo      - Go to: https://console.firebase.google.com
-                echo      - Project Settings ^> Service accounts
-                echo      - Ensure the service account has Firebase Admin role
-                echo   3. Alternatively, use Google Cloud Console:
-                echo      - Go to: https://console.cloud.google.com/iam-admin/iam
-                echo      - Find the service account email from google-play-json
-                echo      - Grant role: Firebase Admin
-                exit /b 1
-            )
-            echo [OK] Firebase App ID validated
-
-            echo [INFO] Validating Crashlytics upload access...
-            REM Create unique temp dir to test upload permissions
-            set "TEMP_TEST_DIR=%TEMP%\\firebase_preflight_%BUILD_NUMBER%_%RANDOM%"
-            if exist "%TEMP_TEST_DIR%" rmdir /s /q "%TEMP_TEST_DIR%"
-            mkdir "%TEMP_TEST_DIR%"
-
-            REM Try to upload - expect "no symbols found" error (exit code 1) but NOT auth errors
-            "${firebaseCmd}" crashlytics:symbols:upload --app="${firebaseAppId}" "%TEMP_TEST_DIR%" 2>&1 | findstr /i "permission denied unauthorized forbidden invalid" >nul
-            if not errorlevel 1 (
-                echo [ERROR] Crashlytics upload permission denied - service account lacks Crashlytics permissions
-                echo.
-                echo To fix:
-                echo   1. Go to: https://console.firebase.google.com
-                echo   2. Select your project ^> Project Settings ^> Service accounts
-                echo   3. Find the service account used in google-play-json credential
-                echo   4. Grant role: Firebase Crashlytics Admin
-                echo.
-                echo   Alternatively via Google Cloud Console:
-                echo   1. Go to: https://console.cloud.google.com/iam-admin/iam
-                echo   2. Find the service account email
-                echo   3. Add role: Firebase Crashlytics Admin
-                rmdir /s /q "%TEMP_TEST_DIR%"
-                exit /b 1
-            )
-
-            rmdir /s /q "%TEMP_TEST_DIR%"
-            echo [OK] Crashlytics upload access validated
-        """
-    }
-
-    echo "[OK] Firebase CLI preflight passed (App ID: ${firebaseAppId})"
+    // Firebase CLI is present (checked above) and the App ID is extracted + well-formed.
+    // We deliberately do NOT pre-validate with `firebase apps:sdkconfig`: that call needs
+    // Firebase *read* access (Firebase Viewer), a different permission than the symbol upload
+    // needs (Firebase Crashlytics Admin) — so the read check could wrongly disable an upload
+    // that would actually succeed. The real `crashlytics:symbols:upload` is the source of
+    // truth and fails soft (marks the build unstable, never breaks it).
+    echo "[OK] Firebase CLI preflight passed (App ID: ${firebaseAppId}); upload is verified at upload time"
 }
 
 // ============================================================================
@@ -7340,13 +7284,15 @@ Get-ChildItem -Path \$extractDir -Recurse -File | Where-Object { \$_.Name -match
 }
 Write-Host "[INFO] Renamed \$renamed symbol files to .so format"
 
-# Remove Firebase libraries that cause issues
+# Remove libraries that break the upload - the symbol generator aborts the whole upload on the first
+# library it cannot process. libFirebaseCpp*: Firebase's own libraries. libwebrtc.so: the com.unity.webrtc
+# prebuilt, on which dump_syms exits 1.
 \$removed = 0
-Get-ChildItem -Path \$extractDir -Recurse -File | Where-Object { \$_.Name -like 'libFirebaseCpp*' } | ForEach-Object {
+Get-ChildItem -Path \$extractDir -Recurse -File | Where-Object { \$_.Name -like 'libFirebaseCpp*' -or \$_.Name -eq 'libwebrtc.so' } | ForEach-Object {
     Remove-Item -Force \$_.FullName
     \$removed++
 }
-if (\$removed -gt 0) { Write-Host "[INFO] Removed \$removed Firebase library files" }
+if (\$removed -gt 0) { Write-Host "[INFO] Removed \$removed library files the symbol upload cannot process (libFirebaseCpp*, libwebrtc.so)" }
 
 # List what we're uploading
 Write-Host '[INFO] Symbol files to upload:'
@@ -7365,8 +7311,9 @@ Get-ChildItem -Path \$extractDir -Recurse -Filter '*.so' | Select-Object -First 
     // Use FIREBASE_CMD if set (for Jenkins service accounts without PATH)
     def firebaseCmd = env.FIREBASE_CMD ?: 'firebase'
     def nodejsDirUpload = (env.NODEJS_HOME ?: 'C:\\Program Files\\nodejs').replace('/', '\\')
+    def rc = 1
     withCredentials([file(credentialsId: 'google-play-json', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
-        bat """
+        rc = bat(returnStatus: true, script: """
             @echo off
             REM Ensure Node.js is in PATH (required for firebase.cmd)
             if exist "${nodejsDirUpload}\\node.exe" set "PATH=${nodejsDirUpload};%PATH%"
@@ -7388,16 +7335,21 @@ Get-ChildItem -Path \$extractDir -Recurse -Filter '*.so' | Select-Object -First 
             echo [INFO] Uploading Android symbols to Crashlytics...
             echo [INFO] Symbols path: ${uploadPath}
 
-            "${firebaseCmd}" crashlytics:symbols:upload --app="${appId}" "${uploadPath}"
-            if errorlevel 1 (
-                echo [WARN] Crashlytics symbol upload failed - this is non-fatal
-                echo [INFO] Crash reports will still work but may not be fully symbolicated
-                REM Don't fail the build for symbol upload issues
-                exit /b 0
-            )
+            REM firebase is a .cmd: without call, control never returns to this script
+            call "${firebaseCmd}" crashlytics:symbols:upload --app="${appId}" "${uploadPath}"
+            exit /b %ERRORLEVEL%
+        """)
+    }
 
-            echo [OK] Crashlytics symbols uploaded successfully
-        """
+    if (rc == 0) {
+        echo "[OK] Crashlytics symbols uploaded successfully"
+        return
+    }
+    echo "[WARN] Crashlytics symbol upload failed (exit ${rc}) - build NOT failed, continuing."
+    echo "[WARN] Crash reports still arrive, but native frames stay unsymbolicated. The crashlytics output above"
+    echo "[WARN] names the library it stopped on; one library it cannot process aborts the whole upload."
+    if (ensureCommon()) {
+        common.setUnstable("Crashlytics symbol upload failed - see the crashlytics output in the log")
     }
 }
 
