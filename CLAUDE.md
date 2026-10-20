@@ -324,6 +324,13 @@ a sidebar link, a build-description link and a `Build Errors` link in Slack. The
 `extractErrorLines()`, so they appear in `unity_errors.log`. Make each line say what is wrong, not just how
 many things are: only the first line of a message is kept, capped at 300 characters.
 
+`Pipeline.Build()` marks the exception that ends it (`[BUILD-ERROR] Build failed: <message>`), so an
+exception inside the Build invocation (a pre-build method, an unresolved `PRE_BUILD_METHODS` name, the
+up-front Addressables content build) is reported this way. A player build that fails returns a report
+rather than throwing; `ReportBuildErrors()` logs its messages as `[Error]` lines for `unity_errors.log`.
+A failure before `Pipeline.Build()` (a platform entry point's keystore or version-code check) or in the
+Prepare stage is not marked.
+
 ## Firebase Crashlytics Symbol Upload
 
 1. Set `UPLOAD_CRASHLYTICS_SYMBOLS=true` in Jenkins job config
@@ -368,8 +375,8 @@ short while the full list is one click away.
 
 Job env `PRE_BUILD_METHODS=Namespace.Type.Method; Other.Type.Method` names static, parameterless methods in the Unity project. Set it in the job's Properties Content like any other job env, **without quotes**: quotes are kept literally and the name then fails to resolve. `Pipeline.Build()` runs them in order inside the Build invocation, after `UpdateVersionData()` and **before** `EnsureAddressablesContentBuilt` and the player build, so a project's data checks fail a build before any content is built. They run in the **Unity Build** stage; the separate "Pre-Build Script" stage is `PREBUILD_SCRIPT` (below) and shows ~0 ms when that param is empty. A nested type is written `Outer+Inner`.
 
-- A method that throws fails the build (exit 1): the full exception chain is logged, then `Build failed: Pre-build method '...' failed ...`.
-- A name that does not resolve (missing type or method) also fails the build, so a typo cannot silently skip the checks.
+- A method that throws fails the build (exit 1): the full exception chain is logged, then `[BUILD-ERROR] Build failed: Pre-build method '...' failed ...`.
+- A name that does not resolve (missing type or method) also fails the build, so a typo cannot silently skip the checks. It is reported the same way: `[BUILD-ERROR] Build failed: PRE_BUILD_METHODS: '<type>' has no static parameterless method '<name>'`.
 - Unset or empty: no-op. Each project opts in through its own job configuration; the pipeline never names project types.
 - Not to be confused with `PREBUILD_SCRIPT` (below), which runs a shell script on the agent before Unity opens.
 

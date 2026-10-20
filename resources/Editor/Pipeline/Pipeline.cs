@@ -242,7 +242,9 @@ public static void Build(string outputPath, BuildOptions options)
             }
             catch (Exception ex)
             {
-                LogError($"Build failed: {ex.Message}");
+                // Marked so the reason reaches build_errors.txt and unity_errors.log whatever the
+                // message says; most messages match none of the pipeline's error patterns.
+                LogError($"{ErrorMarker} Build failed: {ex.Message}");
                 exitCode = 1;
             }
             finally
