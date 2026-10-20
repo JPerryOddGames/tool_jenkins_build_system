@@ -297,6 +297,9 @@ after the last build step) reads that one file → `setUnstable()` once with the
   Keep this list specific — a normal Unity build logs hundreds of warnings.
 - Keep tools decoupled: a tool that wants to flag the build emits the marker (or matches a pattern);
   the pipeline never reads another product's private files or APIs.
+- A failed build never reaches the Build Warnings stage. `finalizeBuild()` still adds the `warnings │ N`
+  badge and sidebar link (`linkBuildWarnings()`) without changing the result, so warnings raised before
+  the failure stay one click away.
 
 ### Build Errors (`[BUILD-ERROR]`)
 
@@ -306,6 +309,12 @@ build callback, or an exception from a `PRE_BUILD_METHODS` method). When the Uni
 non-zero, `runUnityCommand()` calls `failWithReportedBuildErrors()`, which fails as a **known error** listing
 those lines (first 10 in the explanation) — the Slack post shows them instead of the AI error analysis. No
 file, or an empty one: the usual `Unity command failed` failure and analysis run unchanged.
+
+`build_errors.txt` is surfaced like `unity_errors.log`, through the same `linkErrorLog()` (with its own badge
+id and `BUILD_ERRORS_URL`): a red `build errors │ N` badge on the build list, a summary box listing the lines,
+a sidebar link, a build-description link and a `Build Errors` link in Slack. The lines also match
+`extractErrorLines()`, so they appear in `unity_errors.log`. Make each line say what is wrong, not just how
+many things are: only the first line of a message is kept, capped at 300 characters.
 
 ## Firebase Crashlytics Symbol Upload
 
@@ -332,9 +341,11 @@ file, or an empty one: the usual `Unity command failed` failure and analysis run
 
 A build tool that writes a human-readable report into `ARTIFACT_PATH/reports/` gets it archived with the
 build (the `artifacts` dir is archived in `post { always }`), a `Report: <file>` sidebar link, and — on
-unstable or failed builds — a `Reports:` line of links in the Slack post. `linkBuildReports()` (called from
-`sendSlackBuildNotification()`, once per build) lists the folder on the agent; the pipeline never reads
-the reports themselves. Use it for detail too long for a `[BUILD-WARN]` line, so the log and Slack stay
+unstable or failed builds — a `report │ <file>` badge on the build list and a `Reports:` line of links in the
+Slack post. `linkBuildReports()` (called from `sendSlackBuildNotification()`) lists the folder on the agent
+once per build; on its first call once the build is unstable or failed it archives `reports/**` straight
+away (the Slack post goes out before the final archive) and adds the badges. The pipeline never reads the
+reports themselves. Use it for detail too long for a `[BUILD-WARN]` line, so the log and Slack stay
 short while the full list is one click away.
 
 ## GitHub Auth for Private Packages (PATs)
@@ -347,7 +358,7 @@ short while the full list is one click away.
 
 ## Pre-Build Methods (`PRE_BUILD_METHODS`)
 
-Job env `PRE_BUILD_METHODS="Namespace.Type.Method; Other.Type.Method"` names static, parameterless methods in the Unity project. `Pipeline.Build()` runs them in order inside the Build invocation, after `UpdateVersionData()` and **before** `EnsureAddressablesContentBuilt` and the player build, so a project's data checks fail a build before any content is built. A nested type is written `Outer+Inner`.
+Job env `PRE_BUILD_METHODS=Namespace.Type.Method; Other.Type.Method` names static, parameterless methods in the Unity project. Set it in the job's Properties Content like any other job env, **without quotes**: quotes are kept literally and the name then fails to resolve. `Pipeline.Build()` runs them in order inside the Build invocation, after `UpdateVersionData()` and **before** `EnsureAddressablesContentBuilt` and the player build, so a project's data checks fail a build before any content is built. They run in the **Unity Build** stage; the separate "Pre-Build Script" stage is `PREBUILD_SCRIPT` (below) and shows ~0 ms when that param is empty. A nested type is written `Outer+Inner`.
 
 - A method that throws fails the build (exit 1): the full exception chain is logged, then `Build failed: Pre-build method '...' failed ...`.
 - A name that does not resolve (missing type or method) also fails the build, so a typo cannot silently skip the checks.

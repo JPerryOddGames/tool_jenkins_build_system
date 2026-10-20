@@ -76,7 +76,8 @@ def checkBrokenAddressables() {
 //   Shell   echo "msg" >> "$ARTIFACT_PATH/build_warnings.txt"
 // Optional UNSTABLE_WARNING_PATTERNS (job env, ';'-separated regexes) promotes matching native
 // Unity/Xcode warnings too. checkBuildWarnings() (the 'Build Warnings' stage, after every build
-// step) is the only reader: one small file, one unstable() call, badge + sidebar + Slack.
+// step) turns the file into one unstable() call, badge + sidebar + Slack. A failed build never
+// reaches that stage, so finalizeBuild() adds just the badge + sidebar link (linkBuildWarnings).
 // ============================================================================
 
 /**
@@ -161,27 +162,44 @@ def appendBuildWarning(String line) {
 
 /**
  * Flag the build UNSTABLE for every warning the build tools raised (see the section header).
- * No-op when build_warnings.txt is absent or empty. Otherwise: lists them in the log, adds a
- * yellow 'warnings | N' badge and a sidebar link to the archived file, and calls setUnstable()
- * once with the (capped) list so the Slack post shows them.
+ * No-op when build_warnings.txt is absent or empty. Otherwise: lists them in the log, links the
+ * file (linkBuildWarnings), and calls setUnstable() once with the (capped) list so the Slack post
+ * shows them.
  */
 def checkBuildWarnings() {
-    if (!env.ARTIFACT_PATH) return
+    def lines = linkBuildWarnings()
+    if (!lines) { echo "[OK] No build warnings raised"; return }
+
+    echo "========== BUILD WARNINGS (${lines.size()}) =========="
+    lines.each { echo "  - ${it}" }
+    echo "=============================================="
+
+    def maxShown = 10
+    def shown = lines.take(maxShown).collect { "• ${it}" }
+    def more = lines.size() > maxShown ? "\n… ${lines.size() - maxShown} more — see build_warnings.txt" : ''
+    setUnstable("Build warnings (${lines.size()}):\n${shown.join('\n')}${more}")
+}
+
+/**
+ * Return the lines of ARTIFACT_PATH/build_warnings.txt (trimmed, de-duplicated; empty when the file
+ * is absent or empty) and, once per build, add a yellow 'warnings | N' badge and a sidebar link to
+ * it. Does not change the build result: checkBuildWarnings() does that on a build that got that far,
+ * and finalizeBuild() calls this directly so a failed build still shows the warnings raised before
+ * it failed.
+ */
+def linkBuildWarnings() {
+    if (!env.ARTIFACT_PATH) return []
     def reportPath = "${env.ARTIFACT_PATH}/build_warnings.txt"
-    if (!fileExists(reportPath)) { echo "[OK] No build warnings raised"; return }
+    if (!fileExists(reportPath)) return []
 
     def lines = []
     try {
         lines = readFile(reportPath).readLines().collect { it.trim() }.findAll { it }.unique()
     } catch (Exception e) {
         echo "[WARN] Could not read ${reportPath}: ${e.message}"
-        return
+        return []
     }
-    if (!lines) { echo "[OK] No build warnings raised"; return }
-
-    echo "========== BUILD WARNINGS (${lines.size()}) =========="
-    lines.each { echo "  - ${it}" }
-    echo "=============================================="
+    if (!lines || env.BUILD_WARNINGS_URL) return lines
 
     // Archived from inside dir('artifacts'), so the file sits at the artifact root.
     def reportUrl = "${env.BUILD_URL}artifact/build_warnings.txt"
@@ -193,11 +211,7 @@ def checkBuildWarnings() {
     } catch (Exception e) {
         echo "[WARN] Could not add build-warnings badge: ${e.message}"
     }
-
-    def maxShown = 10
-    def shown = lines.take(maxShown).collect { "• ${it}" }
-    def more = lines.size() > maxShown ? "\n… ${lines.size() - maxShown} more — see build_warnings.txt" : ''
-    setUnstable("Build warnings (${lines.size()}):\n${shown.join('\n')}${more}")
+    return lines
 }
 
 // ============================================================================
@@ -205,39 +219,70 @@ def checkBuildWarnings() {
 //
 // A build tool that writes a human-readable report into ARTIFACT_PATH/reports/ gets it archived with
 // the build (the artifacts dir is archived in post), a sidebar link, and - on unstable or failed
-// builds - a link in the Slack post. The pipeline never reads the reports themselves.
+// builds - a 'report | <file>' badge on the build list and a link in the Slack post. The pipeline
+// never reads the reports themselves.
 // ============================================================================
 
 /**
  * Add a sidebar link per file in ARTIFACT_PATH/reports/ and record the links for the Slack post in
- * env.BUILD_REPORT_LINKS. Runs once per build; later calls are no-ops. No-op when the folder is
- * absent or empty, or when there is no agent to list it on.
+ * env.BUILD_REPORT_LINKS; the folder is listed once per build. On the first call once the build is
+ * unstable or failed (unsuccessful, or currentBuild.result says so), also archive the reports
+ * straight away - the Slack post goes out before the final archive - and add a 'report | <file>'
+ * badge per file to the build list. No-op when the folder is absent or empty, or when there is no
+ * agent to list it on.
  */
-def linkBuildReports() {
-    if (env.BUILD_REPORTS_LINKED == 'true' || !env.ARTIFACT_PATH) return
-    env.BUILD_REPORTS_LINKED = 'true'
+def linkBuildReports(boolean unsuccessful = false) {
+    if (!env.ARTIFACT_PATH) return
 
-    def names = []
+    if (env.BUILD_REPORTS_LINKED != 'true') {
+        env.BUILD_REPORTS_LINKED = 'true'
+
+        def names = []
+        try {
+            def reportsDir = "${env.ARTIFACT_PATH}/reports"
+            if (!fileExists(reportsDir)) return
+            def listing = isUnix()
+                ? sh(returnStdout: true, script: "ls -1p '${reportsDir}' | grep -v '/\$' || true")
+                : bat(returnStdout: true, script: "@dir /b /a-d \"${reportsDir.replace('/', '\\')}\" 2>nul")
+            names = listing.readLines().collect { it.trim() }.findAll { it }.sort()
+        } catch (Exception e) {
+            echo "[WARN] Could not list build reports: ${e.message}"
+            return
+        }
+        if (!names) return
+
+        env.BUILD_REPORT_NAMES = names.join('\n')
+        def links = names.collect { name ->
+            def url = buildReportUrl(name)
+            addSidebarLink(url, "Report: ${name}", 'document.png')
+            "<${url}|${name}>"
+        }
+        env.BUILD_REPORT_LINKS = links.join(' · ')
+    }
+
+    boolean flagged = unsuccessful || (currentBuild.result in ['UNSTABLE', 'FAILURE'])
+    if (!flagged || !env.BUILD_REPORT_NAMES || env.BUILD_REPORT_BADGES == 'true') return
+    env.BUILD_REPORT_BADGES = 'true'
+
     try {
-        def reportsDir = "${env.ARTIFACT_PATH}/reports"
-        if (!fileExists(reportsDir)) return
-        def listing = isUnix()
-            ? sh(returnStdout: true, script: "ls -1p '${reportsDir}' | grep -v '/\$' || true")
-            : bat(returnStdout: true, script: "@dir /b /a-d \"${reportsDir.replace('/', '\\')}\" 2>nul")
-        names = listing.readLines().collect { it.trim() }.findAll { it }.sort()
+        dir(env.ARTIFACT_PATH) {
+            archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
+        }
     } catch (Exception e) {
-        echo "[WARN] Could not list build reports: ${e.message}"
-        return
+        echo "[WARN] Could not archive build reports now (links resolve after the final archive): ${e.message}"
     }
-    if (!names) return
+    env.BUILD_REPORT_NAMES.split('\n').each { name ->
+        try {
+            addShieldsDoubleBadge("report-${name}", 'report', name, '555555', 'blue', null, buildReportUrl(name))
+        } catch (Exception e) {
+            echo "[WARN] Could not add report badge for ${name}: ${e.message}"
+        }
+    }
+}
 
+String buildReportUrl(String name) {
     // Archived from inside dir('artifacts'), so the reports sit under artifact/reports/.
-    def links = names.collect { name ->
-        def url = "${env.BUILD_URL}artifact/reports/${java.net.URLEncoder.encode(name, 'UTF-8').replace('+', '%20')}"
-        addSidebarLink(url, "Report: ${name}", 'document.png')
-        "<${url}|${name}>"
-    }
-    env.BUILD_REPORT_LINKS = links.join(' · ')
+    return "${env.BUILD_URL}artifact/reports/${java.net.URLEncoder.encode(name, 'UTF-8').replace('+', '%20')}"
 }
 
 /**
@@ -257,8 +302,10 @@ def failWithKnownError(String badgeLabel, String explanation, String fix = null)
 /**
  * Fail as a known error (no AI analysis) listing the errors build tools reported in
  * ARTIFACT_PATH/build_errors.txt — Unity writes that file from any log line carrying [BUILD-ERROR]
- * (PipelineWarnings.cs). No-op when the file is absent or empty, so the caller's own failure
- * handling still runs. Call it only once the build step has already failed.
+ * (PipelineWarnings.cs). The file gets the same treatment as unity_errors.log (linkErrorLog): a red
+ * 'build errors | N' badge, a summary box listing the errors, a sidebar link, a description entry
+ * and env.BUILD_ERRORS_URL for the Slack post. No-op when the file is absent or empty, so the
+ * caller's own failure handling still runs. Call it only once the build step has already failed.
  */
 def failWithReportedBuildErrors() {
     if (!env.ARTIFACT_PATH) return
@@ -283,6 +330,8 @@ def failWithReportedBuildErrors() {
     def shown = lines.take(maxShown)
     def more = lines.size() > maxShown ? "\n… ${lines.size() - maxShown} more — see build_errors.txt" : ''
     def explanation = "Build errors (${lines.size()}):\n${shown.collect { "• ${it}" }.join('\n')}${more}"
+
+    linkErrorLog('build_errors.txt', 'Build Errors', [badgeId: 'build-errors', urlEnv: 'BUILD_ERRORS_URL', logo: null, count: lines.size(), details: shown])
 
     def errors = shown.collect { [severity: 'ERROR', stage: stage, message: it] }
     def analysis = [explanation: explanation, errors: errors, knownError: true]
@@ -1208,6 +1257,9 @@ def sendSlackBuildNotification(Map config) {
         links += " | <${localShareUrl(env.LOCAL_BUILD_PATH)}|:open_file_folder: Local>"
     }
     if (status == 'failure' || status == 'unstable') {
+        if (env.BUILD_ERRORS_URL) {
+            links += " | <${env.BUILD_ERRORS_URL}|:no_entry: Build Errors>"
+        }
         if (env.UNITY_ERRORS_URL) {
             links += " | <${env.UNITY_ERRORS_URL}|:rotating_light: Unity Errors>"
         }
@@ -1256,7 +1308,7 @@ def sendSlackBuildNotification(Map config) {
     }
 
     // Reports the build tools left in ARTIFACT_PATH/reports/.
-    linkBuildReports()
+    linkBuildReports(status == 'unstable' || status == 'failure')
     if (env.BUILD_REPORT_LINKS && (status == 'unstable' || status == 'failure')) {
         blocks << [type: 'context', elements: [[type: 'mrkdwn', text: ":page_facing_up: Reports: ${env.BUILD_REPORT_LINKS}".take(2900)]]]
     }
@@ -1779,6 +1831,7 @@ def extractErrorLines(List lines) {
         ~/Error building Player/,
         ~/UnityException/,
         ~/BuildFailedException/,
+        ~/\[BUILD-ERROR\]/,
         ~/InvalidOperationException/,
         ~/NullReferenceException/,
         ~/MissingReferenceException/,
@@ -1861,13 +1914,22 @@ def extractErrorLines(List lines) {
 
 /**
  * Surface a clickable link to an archived error log:
- *   - a red "Unity Errors" shields.io badge on the build (links to the log),
+ *   - a red shields.io badge on the build (links to the log),
  *   - a summary box on the build status page (manager.createSummary),
  *   - a left-sidebar link on the build status page (addSidebarLink),
  *   - an entry appended to the build description (shown in the Builds history widget),
- *   - env.UNITY_ERRORS_URL, so the Slack notification can link to it,
+ *   - an env var holding the URL, so the Slack notification can link to it,
  *   - the plain URL echoed into the stage log (for the pipeline overview).
  * artifactRelPath is relative to the 'artifacts/' dir (ARTIFACT_PATH).
+ *
+ * The defaults describe unity_errors.log. Another error log passes opts so it does not
+ * replace that one's badge or URL:
+ *   badgeId  - badge id (default 'unity-errors')
+ *   urlEnv   - env var that receives the URL (default 'UNITY_ERRORS_URL'); the
+ *              once-only guard is the same name with _URL replaced by _LINKED
+ *   logo     - shields.io logo, or null for none (default 'unity')
+ *   count    - when set, the badge reads '<label lower-cased> | <count>'
+ *   details  - lines listed under the link in the summary box
  *
  * The file is archived HERE, not left for post{always{}}: the Slack failure post
  * goes out from post{failure{}}, which runs BEFORE always{} archives the artifacts
@@ -1880,8 +1942,13 @@ def extractErrorLines(List lines) {
  * (collectUnityErrors). The badge/env/description refresh on every call; the
  * sidebar link and summary box are added once (guarded) so they don't duplicate.
  */
-def linkErrorLog(String artifactRelPath, String label = 'Unity Errors') {
+def linkErrorLog(String artifactRelPath, String label = 'Unity Errors', Map opts = [:]) {
     if (!env.BUILD_URL) { echo "[WARN] linkErrorLog: BUILD_URL not set, skipping link"; return }
+    def badgeId = opts.badgeId ?: 'unity-errors'
+    def urlEnv = opts.urlEnv ?: 'UNITY_ERRORS_URL'
+    def linkedEnv = urlEnv.replaceAll(/_URL$/, '') + '_LINKED'
+    def logo = opts.containsKey('logo') ? opts.logo : 'unity'
+
     def url = "${env.BUILD_URL}artifact/${artifactRelPath}"
     try {
         if (env.ARTIFACT_PATH) {
@@ -1892,23 +1959,30 @@ def linkErrorLog(String artifactRelPath, String label = 'Unity Errors') {
     } catch (Exception e) {
         echo "[WARN] linkErrorLog: could not archive ${artifactRelPath} now (link resolves after the final archive): ${e.message}"
     }
-    env.UNITY_ERRORS_URL = url
+    env[urlEnv] = url
     echo "[INFO] ${label} log: ${url}"
 
     // Red shields.io badge, clickable through to the log (idempotent: addShieldsBadge
     // removes the prior badge with this id before re-adding).
-    addShieldsBadge('unity-errors', label, 'red', url, 'unity')
+    if (opts.count != null) {
+        addShieldsDoubleBadge(badgeId, label.toLowerCase(), "${opts.count}", '555555', 'red', null, url, logo)
+    } else {
+        addShieldsBadge(badgeId, label, 'red', url, logo)
+    }
 
     // Sidebar link + summary box only once, so the inline + post calls don't duplicate them.
-    if (env.UNITY_ERRORS_LINKED != 'true') {
+    if (env[linkedEnv] != 'true') {
         try {
-            manager.createSummary('error.png').appendText(
-                "<b>${label}:</b> <a href=\"${url}\">${artifactRelPath}</a>", false)
+            def html = "<b>${label}:</b> <a href=\"${url}\">${artifactRelPath}</a>"
+            if (opts.details) {
+                html += '<ul>' + opts.details.collect { "<li>${escapeHtml(it.toString())}</li>" }.join('') + '</ul>'
+            }
+            manager.createSummary('error.png').appendText(html, false)
         } catch (Exception e) {
             echo "[WARN] linkErrorLog: could not add summary: ${e.message}"
         }
         addSidebarLink(url, label, 'symbol-warning.png')
-        env.UNITY_ERRORS_LINKED = 'true'
+        env[linkedEnv] = 'true'
     }
 
     try {
@@ -1920,6 +1994,10 @@ def linkErrorLog(String artifactRelPath, String label = 'Unity Errors') {
     } catch (Exception e) {
         echo "[WARN] linkErrorLog: could not append to description: ${e.message}"
     }
+}
+
+String escapeHtml(String text) {
+    return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
 }
 
 /**
@@ -2354,6 +2432,11 @@ def finalizeBuild(Map config) {
 
     // Skip on success or abort - those have their own handlers
     if (status == 'success' || status == 'aborted') return
+
+    // A failed build never reaches the 'Build Warnings' stage; still badge the warnings raised before it failed.
+    if (status == 'failure') {
+        try { linkBuildWarnings() } catch (Exception e) { echo "[WARN] Could not link build warnings: ${e.message}" }
+    }
 
     // Mark any remaining pending uploads as failed
     if (env.UPLOAD_GDRIVE_STATUS == 'pending') env.UPLOAD_GDRIVE_STATUS = 'failed'
